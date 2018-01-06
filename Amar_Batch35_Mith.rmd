@@ -46,7 +46,7 @@ test <- fread('Test.csv', sep = ',', na.strings = c('NA', '?', ''), stringsAsFac
 test$HomeAssetValue <- mean(train$HomeAssetValue)
 predictions <- data.frame(ID = test$ID, HomeAssetValue = test$HomeAssetValue)
 write.csv(x = predictions, file = 'predictions.csv', row.names = FALSE)
-
+test$HomeAssetValue <- NULL
 
 ```
 
@@ -363,6 +363,11 @@ cptest <- test
 cptest <- cptest[, !cols_to_exclude, with=FALSE]
 cptest <- cptest[, !na_cols_to_exclude, with=FALSE]
 
+cptrain$State <- as.factor(cptrain$State)
+cptest$State <- as.factor(cptest$State)
+cptrain$Country <- as.factor(cptrain$Country)
+cptest$Country <- as.factor(cptest$Country)
+
 
 ```
 
@@ -374,34 +379,12 @@ sort(colSums(is.na(cptrain)), decreasing=TRUE)
 
 ```
 
-*AcsQuality column has almost 10% of NAs. 
-
-```{r}
-
-str(cptrain$AcsQuality)
-summary(cptrain$AcsQuality)
-
-table(cptrain$AcsQuality)
-```
-
-* this is a categorical column so setting the value to Gd (assuming those are good)
-
-```{r}
-
-for (i in 1:length(cptrain$AcsQuality)) {
-  if(is.na(cptrain$AcsQuality[i])) {
-    cptrain$AcsQuality[i] <- "Gd"
-  }
-}
-
-table(cptrain$AcsQuality)
-```
 
 
 ```{r}
 sort(colSums(is.na(cptrain)), decreasing=TRUE)
 
-#CellarFinishingQualityType2, InteriorCarParkingFinish, CarParkingType, TilingType,GardenExposure,CellarFinishingQualityType1,CellarQuality
+#AcsQuality, CellarFinishingQualityType2, InteriorCarParkingFinish, CarParkingType, TilingType,GardenExposure,CellarFinishingQualityType1,CellarQuality all have Nas.
 
 getImputedValue <- function(vec) {
   freqVal <- names(sort(table(vec), decreasing=TRUE))[1]
@@ -414,19 +397,11 @@ getImputedValue <- function(vec) {
   return(ret)
 }
 
-
+cptrain$AcsQuality <- getImputedValue(cptrain$AcsQuality)
 cptrain$CellarFinishingQualityType2 <- getImputedValue(cptrain$CellarFinishingQualityType2)
-table(cptrain$CellarFinishingQualityType2)
-sum(is.na(cptrain$CellarFinishingQualityType2))
-
 cptrain$InteriorCarParkingFinish <- getImputedValue(cptrain$InteriorCarParkingFinish)
-sum(is.na(cptrain$InteriorCarParkingFinish))
-
 cptrain$CarParkingType <- getImputedValue(cptrain$CarParkingType)
-sum(is.na(cptrain$CarParkingType))
-
 cptrain$TilingType <- getImputedValue(cptrain$TilingType)
-
 cptrain$GardenExposure <- getImputedValue(cptrain$GardenExposure)
 cptrain$CellarFinishingQualityType1 <- getImputedValue(cptrain$CellarFinishingQualityType1)
 cptrain$CellarQuality <- getImputedValue(cptrain$CellarQuality)
@@ -449,26 +424,419 @@ cptest$GardenExposure <- getImputedValue(cptest$GardenExposure)
 cptest$TilingType <- getImputedValue(cptest$TilingType)
 cptest$CellarQuality <- getImputedValue(cptest$CellarQuality)
 
-sort(colSums(is.na(cptest)), decreasing=TRUE)
-
+sum(is.na(cptest))
 ```
 
 
 ###Convert all factor columns into numeric by creating dummy variables
 
 ```{r}
-cptrain$State <- as.factor(cptrain$State)
-cptest$State <- as.factor(cptest$State)
-cptrain$Country <- as.factor(cptrain$Country)
-cptest$Country <- as.factor(cptest$Country)
+library(dummies)
 summary(cptrain)
+summary(cptest)
+
+#removing ID from train
+rownames(cptrain) <- cptrain$ID
+cptrain$ID <- NULL
+rownames(cptest) <- cptest$ID
+cptest$ID <- NULL
 
 factorcols <- names(which(sapply(cptrain, class) == 'factor'))
+numericcols <- names(which(sapply(cptrain, class) != 'factor'))
+numericcols
+dummified_train <- dummy.data.frame(cptrain, names = factorcols, sep = "_")
+dummified_test <- dummy.data.frame(cptest, names = factorcols, sep = "_")
 
-library(dummies)
+#there are a few columns missing in test that are in train - these are levels from categorical columns.
+#remove those from train
+missingcols <- setdiff(colnames(dummified_train), colnames(dummified_test))
+missingcols
 
-sapply(cptrain[,factorcols, with=FALSE], dummy.data.frame)
+#of these HomeAssetValue is expected to be missing. the rest we have to exclude
+missingcols <- missingcols[which(missingcols != 'HomeAssetValue')]
 
-str(cptrain$State)
+clean_train <- dummified_train[,!colnames(dummified_train) %in% missingcols]
+clean_test <- dummified_test
+
+```
+
+#Center and scale numeric variables
+
+```{r}
+library(caret)
+
+numericcols
+numeric_x <- numericcols[which(numericcols != 'HomeAssetValue')]
+numeric_x
+preproc_preds <- preProcess(x = clean_train[,colnames(clean_train) %in% numeric_x], method = c("center", "scale"))
+clean_train <- predict(preproc_preds, clean_train)
+clean_test <- predict(preproc_preds, clean_test)
+summary(clean_train)
+summary(clean_test)
+ncol(clean_train)
+ncol(clean_test)
+
+
+
+```
+
+###Splitting train set into train and validation
+```{r}
+train_rows <- sample(x = 1:nrow(clean_train), replace = F, size = nrow(clean_train)*0.7)
+
+
+train1 <- clean_train[train_rows, ]
+val1 <- clean_train[-train_rows, ]
+```
+
+
+
+##Model Building
+
+### Simple LM Model (will follow with StepAIC)
+```{r}
+
+lm_mdl <- lm(HomeAssetValue ~ ., train1)
+summary(lm_mdl)
+par(mfrow=c(2,2))
+plot(lm_mdl)
+par(mfrow=c(1,1))
+
+```
+
+```{r}
+getconstantcols <- function(in_df) {
+  constantcols <- colnames(in_df[ ,sapply(in_df, function(v){ var(v, na.rm=TRUE)==0})])
+  return(constantcols)
+}
+
+getconstantcols(train1)
+
+
+```
+
+
+
+#There's a lot of heteroscadasticity and also the QQ plot shows there's a lot of variance in errors.
+
+```{r}
+mdl1_preds <- predict(object = lm_mdl, newdata = val1)
+
+library(DMwR)
+regr.eval(mdl1_preds, val1$HomeAssetValue)
+
+mdl1_unseen <- predict(object = lm_mdl, newdata = clean_test)
+
+write.csv(x = mdl1_unseen, file = 'predictions.csv')
+
+```
+
+** This gave a MAPE of 28.68%. However the model summary shows a low value of Rsquared and lot of insignificant variables.
+** Will try using StepAIC to reduce the number of variables
+
+```{r}
+library(MASS)
+aic_options <- stepAIC(object = lm_mdl, direction="both", trace=FALSE)
+
+```
+
+
+# will use log of HomeAssetValue for predictions
+
+
+
+### Lasso 
+```{r}
+
+library(glmnet)
+set.seed(1234)
+
+cv_lasso <- cv.glmnet(as.matrix(subset(train1, select = -HomeAssetValue)), as.matrix(train1$HomeAssetValue), alpha = 1, type.measure = "deviance", nfolds = 5)
+par(mfrow=c(1,2))
+plot(cv_lasso)
+plot(cv_lasso$glmnet.fit, xvar = 'lambda', label = TRUE)
+par(mfrow=c(1,1))
+
+```
+
+
+* Trying lasso regression with lambda = min
+```{r}
+cv_lasso$lambda
+lasso_1 <- glmnet(x = as.matrix(subset(train1, select = -HomeAssetValue)), y = as.matrix(train1$HomeAssetValue), family = "gaussian", alpha = 1, lambda = cv_lasso$lambda.min)
+lasso_1
+```
+
+```{r}
+lasso1_preds <- predict(object = lasso_1, newx = as.matrix(subset(val1, select = -HomeAssetValue)))
+regr.eval(lasso1_preds, val1$HomeAssetValue)
+```
+
+#submitting predictions on test data
+```{r}
+lasso1_test_preds <- predict(object = lasso_1, newx = as.matrix(clean_test))
+
+write.csv(x = lasso1_test_preds, file = 'predictions.csv')
+
+
+```
+
+** This gave a MAPE of 28.49068%
+
+###trying with lamda of 1se
+```{r}
+
+lasso2 <- glmnet(x = as.matrix(subset(train1, select = -HomeAssetValue)), y = as.matrix(train1$HomeAssetValue), family = "gaussian", alpha = 1, lambda = cv_lasso$lambda.1se)
+lasso2
+
+```
+
+```{r}
+lasso2_preds <- predict(object = lasso2, newx = as.matrix(subset(val1, select = -HomeAssetValue)))
+regr.eval(lasso2_preds, val1$HomeAssetValue)
+
+```
+
+```{r}
+
+lasso2_test_preds <- predict(object = lasso2, newx = as.matrix(clean_test))
+
+write.csv(x = lasso2_test_preds, file = 'predictions.csv')
+
+```
+
+**With lambda at 1se, we got a MAPE of 28.66485% on Grader... so not using 1se and keeping min**
+
+
+###ElasticNEt
+```{r}
+
+
+set.seed(1234)
+
+cv_elast <- cv.glmnet(as.matrix(subset(train1, select = -HomeAssetValue)), as.matrix(train1$HomeAssetValue), alpha = 0.5, type.measure = "deviance", nfolds = 5)
+par(mfrow=c(1,2))
+plot(cv_elast)
+plot(cv_elast$glmnet.fit, xvar = 'lambda', label = TRUE)
+par(mfrow=c(1,1))
+
+```
+
+
+```{r}
+elast1 <- glmnet(x = as.matrix(subset(train1, select = -HomeAssetValue)), y = as.matrix(train1$HomeAssetValue), family = "gaussian", alpha = 0.5, lambda = cv_elast$lambda.min)
+elast1
+```
+
+```{r}
+elast1_preds <- predict(object = elast1, newx = as.matrix(subset(val1, select = -HomeAssetValue)))
+regr.eval(elast1_preds, val1$HomeAssetValue)
+elast1_test_preds <- predict(object = elast1, newx = as.matrix(clean_test))
+
+write.csv(x = elast1_test_preds, file = 'predictions.csv')
+```
+
+**Submission on grader got a MAPE of 28.4867%**
+
+
+**since there are a lot of columns, trying PCA**
+```{r}
+set.seed(1234)
+train_pca <- prcomp(x = train1[,!colnames(train1) %in% 'HomeAssetValue'])
+summary(train_pca)
+#This shows that first 50 components can account for approximately 94% of variance in the dataset.
+# So building an SVM Model with this dataset
+
+train_pca_data <- data.frame(train_pca$x[,1:50], HomeAssetValue=train1$HomeAssetValue)
+val_pca <- predict(train_pca, newdata = val1)
+
+val_pca <- as.data.frame(val_pca[,1:50])
+
+library(e1071)
+
+svm_mdl <- svm(HomeAssetValue ~ ., data = train_pca_data)
+
+svm_mdl
+
+svm_val_preds <- predict(object = svm_mdl, newdata = val_pca)
+library(DMwR)
+regr.eval(svm_val_preds, val1$HomeAssetValue)
+```
+
+###predicting for svm
+```{r}
+
+#first need to get the test_data into pca
+test_pca <- predict(object = train_pca, newdata = clean_test)
+test_pca <- as.data.frame(test_pca[,1:50])
+svm_test_preds <- predict(object = svm_mdl, newdata = test_pca)
+write.csv(x = svm_test_preds, file = 'predictions.csv')
+
+
+```
+
+
+** This gave a MAPE of 26.55417% on Grader!!!**
+
+
+###Let's try to use KSVM instead
+
+```{r}
+library(kernlab)
+
+ksvm_mdl <- ksvm(HomeAssetValue ~ ., data = train_pca_data, kernel = 'polydot')
+ksvm_mdl
+```
+
+```{r}
+ksvm_val_preds <- predict(object = ksvm_mdl, newdata = val_pca)
+regr.eval(ksvm_val_preds, val1$HomeAssetValue)
+```
+
+
+
+```{r}
+ksvm_test_preds <- predict(object = ksvm_mdl, newdata = test_pca)
+write.csv(x = ksvm_test_preds, file = 'predictions.csv')
+
+
+```
+
+** MAPE increased with polydot kernel function to 28.93886%**
+
+####checking if RBF has any better predictions
+
+```{r}
+train_pca_data <- data.frame(train_pca$x[,1:50], HomeAssetValue=train1$HomeAssetValue)
+val_pca <- predict(train_pca, newdata = val1)
+
+val_pca <- as.data.frame(val_pca[,1:50])
+test_pca <- predict(object = train_pca, newdata = clean_test)
+test_pca <- as.data.frame(test_pca[,1:50])
+ksvm_rbf_mdl <- ksvm(HomeAssetValue ~ ., data = train_pca_data, kernel = 'rbfdot')
+ksvm_rbf_mdl
+```
+
+
+```{r}
+
+ksvm_rbf_val_preds <- predict(object = ksvm_rbf_mdl, newdata = val_pca)
+regr.eval(ksvm_rbf_val_preds, val1$HomeAssetValue)
+```
+
+
+```{r}
+ksvm_rbf_test_preds <- predict(object = ksvm_rbf_mdl, newdata = test_pca)
+submission <- data.frame(ID=rownames(test_pca), HomeAssetValue=ksvm_rbf_test_preds)
+write.csv(x = submission, file = 'predictions.csv', row.names = F)
+```
+
+** This got a MAPE of 26.53% on Grader**
+
+####How about increasing the number of components?
+
+```{r}
+summary(train_pca)
+train_pca_data <- data.frame(train_pca$x[,1:60], HomeAssetValue=train1$HomeAssetValue)
+val_pca <- predict(train_pca, newdata = val1)
+
+val_pca <- as.data.frame(val_pca[,1:60])
+test_pca <- predict(object = train_pca, newdata = clean_test)
+test_pca <- as.data.frame(test_pca[,1:60])
+
+```
+
+
+#### trying RBF with the expanded set
+```{r}
+ksvm_rbf_mdl <- ksvm(HomeAssetValue ~ ., data = train_pca_data, kernel = 'rbfdot')
+ksvm_rbf_mdl
+
+ksvm_rbf_val_preds <- predict(object = ksvm_rbf_mdl, newdata = val_pca)
+regr.eval(ksvm_rbf_val_preds, val1$HomeAssetValue)
+
+ksvm_rbf_test_preds <- predict(object = ksvm_rbf_mdl, newdata = test_pca)
+write.csv(x = ksvm_rbf_test_preds, file = 'predictions.csv')
+```
+
+
+
+###XGBoost maybe?
+
+
+
+```{r}
+library(xgboost)
+params <- list(booster = "gbtree", 
+               objective = "reg:linear", 
+               eta=0.1, 
+               gamma=0,
+               lambda=0.5,
+               alpha=0,
+               max_depth=6, 
+               min_child_weight=1, 
+               subsample=0.6, 
+               colsample_bytree=0.7)
+
+train_matrix <- as.matrix(train_pca_data[,!colnames(train_pca_data) %in% 'HomeAssetValue'])
+label = train_pca_data$HomeAssetValue
+xgb_mdl <- xgboost(data = train_matrix, label = label, params = params, nrounds = 100, print_every_n = 10)
+
+summary(xgb_mdl)
+
+```
+
+
+```{r}
+xgb_preds <- predict(object = xgb_mdl, newdata = as.matrix(val_pca))
+
+regr.eval(xgb_preds, val1$HomeAssetValue)
+```
+
+
+```{r}
+xgb_test_preds <- predict(object = xgb_mdl, newdata = as.matrix(test_pca))
+
+xgb_out <- data.frame(ID=rownames(test_pca), HomeAssetValue=xgb_test_preds)
+
+write.csv(x = xgb_out, file = 'predictions.csv', row.names = F)
+
+```
+
+
+xgboost with original data
+
+```{r}
+library(xgboost)
+params <- list(booster = "gbtree", 
+               objective = "reg:linear", 
+               eta=0.3, 
+               max_depth=6, 
+               min_child_weight=1, 
+               subsample=0.6, 
+               colsample_bytree=1)
+
+train_matrix <- as.matrix(clean_train[,!colnames(clean_train) %in% 'HomeAssetValue'])
+label = clean_train$HomeAssetValue
+xgb_mdl <- xgboost(data = train_matrix, label = label, params = params, nrounds = 100, print_every_n = 10)
+
+summary(xgb_mdl)
+```
+
+```{r}
+xgb_preds <- predict(object = xgb_mdl, newdata = as.matrix(val1))
+
+regr.eval(xgb_preds, val1$HomeAssetValue)
+```
+
+
+```{r}
+
+xgb_test_preds <- predict(object = xgb_mdl, newdata = as.matrix(clean_test))
+
+xgb_out <- data.frame(ID=rownames(clean_test), HomeAssetValue=xgb_test_preds)
+
+write.csv(x = xgb_out, file = 'predictions.csv', row.names = F)
+
 ```
 
