@@ -62,12 +62,12 @@ summary(train)
 str(train)
 
 
+
 ```
 
 ##Observations
 
-* Region - most of the data is for homes in one region (RL). Will be interesting to see
-* the difference in home prices in other regions
+* Region - most of the data is for homes in one region (RL). Will be interesting to see the difference in home prices in other regions
 * Proximity and Proximity2 - most of the data is for Norm proximity, need to see if home prices are different for other proximities
 * The data is for Maharashtra, there are 10 that are NAs - will remove them
 * CompoundWallQuality has unusually large number of NAs... this could indicate a hidden trend.
@@ -132,8 +132,8 @@ region_box <- ggplot(train, aes(group = Region, color = Region)) +
 region_hist <- ggplot(train) +
   geom_bar(mapping = aes(x = Region, fill = Region))
 
-ggarrange(region_box, region_hist)
-print(prop.table(table(train$Region)))
+ggarrange(region_box, region_hist, nrow=2, ncol=1)
+
 ```
 
 **Observation: the RL region accounts for most of the home values but the prices in this region also vary the most. We can think of two models one for RL and other for the rest and combine for predictions.**
@@ -244,10 +244,10 @@ ggarrange(hometype_box, hometype_hist +rremove("x.text"), nrow=2, ncol=1)
 
 ```{r}
 country_box <- ggplot(train) +
-  geom_boxplot(mapping = aes(x = Country, y = HomeAssetValue))
+  geom_boxplot(mapping = aes(x = Country, y = HomeAssetValue, color=Country))
 
 state_box <- ggplot(train) +
-  geom_boxplot(mapping = aes(x = State, y = HomeAssetValue))
+  geom_boxplot(mapping = aes(x = State, y = HomeAssetValue, color = State))
 
 ggarrange(country_box, state_box, nrow=2, ncol = 1)
 ```
@@ -317,7 +317,18 @@ test$ConstructionYear <- NULL
 test$RemodelYear <- NULL
 test$CarParkingStartYear <- NULL
 
-str(test)
+
+
+const_age <- ggplot(train) +
+  geom_point(mapping = aes(x = HomeAssetValue, y = ConstructionAge, color=Region))
+
+remodel_age <- ggplot(train) +
+  geom_point(mapping = aes(x = HomeAssetValue, y = RemodelAge, color=Region))
+
+carpark_age <- ggplot(train) +
+  geom_point(mapping = aes(x = HomeAssetValue, y = CarParkStartAge, color=Region))
+
+ggarrange(const_age, remodel_age, carpark_age, nrow=3)
 
 ```
 
@@ -471,8 +482,7 @@ numeric_x
 preproc_preds <- preProcess(x = clean_train[,colnames(clean_train) %in% numeric_x], method = c("center", "scale"))
 clean_train <- predict(preproc_preds, clean_train)
 clean_test <- predict(preproc_preds, clean_test)
-summary(clean_train)
-summary(clean_test)
+
 ncol(clean_train)
 ncol(clean_test)
 
@@ -643,9 +653,24 @@ write.csv(x = elast1_test_preds, file = 'predictions.csv')
 ```{r}
 set.seed(1234)
 train_pca <- prcomp(x = train1[,!colnames(train1) %in% 'HomeAssetValue'])
+
 summary(train_pca)
 #This shows that first 50 components can account for approximately 94% of variance in the dataset.
 # So building an SVM Model with this dataset
+
+pca_viz <- data.frame(Component=colnames(train_pca$x), CumSum=(cumsum(train_pca$sdev^2 / sum(train_pca$sdev^2))*100), PropVariance=(train_pca$sdev^2 / sum(train_pca$sdev^2))*100)
+rownames(pca_viz) <- pca_viz$Component
+pca_viz$Component <- NULL
+
+head(pca_viz)
+
+write.csv(x = pca_viz, file = 'pcaviz.csv')
+
+ggplot(pca_viz) +
+  geom_bar(mapping = aes(x = CumSum))
+
+str(pca_viz)
+head(pca_viz)
 
 train_pca_data <- data.frame(train_pca$x[,1:50], HomeAssetValue=train1$HomeAssetValue)
 val_pca <- predict(train_pca, newdata = val1)
@@ -707,6 +732,7 @@ write.csv(x = ksvm_test_preds, file = 'predictions.csv')
 ####checking if RBF has any better predictions
 
 ```{r}
+library(kernlab)
 train_pca_data <- data.frame(train_pca$x[,1:50], HomeAssetValue=train1$HomeAssetValue)
 val_pca <- predict(train_pca, newdata = val1)
 
