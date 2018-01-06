@@ -1,0 +1,474 @@
+---
+title: "Amar Rao Batch35_Mith"
+author: "Amar Rao"
+date: "January 6, 2018"
+output: 
+  html_document:
+  toc: true
+  toc_float:
+  collapsed: false
+  theme: united
+  highlight: tang
+  fig_width: 7
+  fig_height: 6
+  fig_caption: true
+  code_folding: hide
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls(all = TRUE))
+
+```
+
+```{r}
+library(data.table)
+library(caret)
+
+```
+
+
+```{r}
+setwd('/home/amar/insofe_mith')
+
+#load the train and test data
+
+train <- fread('Train.csv', sep = ',', na.strings = c('NA', '?', ''), stringsAsFactors = T)
+test <- fread('Test.csv', sep = ',', na.strings = c('NA', '?', ''), stringsAsFactors = T)
+
+```
+
+
+#Initial submission - simple mean. We cannot do worse than this so this will be the
+# floor/low water mark
+```{r}
+test$HomeAssetValue <- mean(train$HomeAssetValue)
+predictions <- data.frame(ID = test$ID, HomeAssetValue = test$HomeAssetValue)
+write.csv(x = predictions, file = 'predictions.csv', row.names = FALSE)
+
+
+```
+
+* This got a MAPE of 37% on Grader.
+
+
+
+
+```{r}
+
+head(train)
+summary(train)
+str(train)
+
+
+```
+
+##Observations
+
+* Region - most of the data is for homes in one region (RL). Will be interesting to see
+* the difference in home prices in other regions
+* Proximity and Proximity2 - most of the data is for Norm proximity, need to see if home prices are different for other proximities
+* The data is for Maharashtra, there are 10 that are NAs - will remove them
+* CompoundWallQuality has unusually large number of NAs... this could indicate a hidden trend.
+* PoolQuality is also missing a very large number of values... Same as compound wall quality
+* ConstructionYear - the oldest house is from 1875 - will engineer a feature to use age of house instead of construction year
+* RemodelYear - instead of using the year, will have a feature to compute years since remodel
+* Country - India - 10 are missing this - will remove those rows
+* ConditionOfSale - need to see how the home price varies with this variable
+* GardenAccessPathType also has very large number of NAs
+* YearOfSale - this shows when the house was last sold?
+* CarParkingStartYear - has a -1 - need to check that. Again, will compute age as a feature
+* Month of Sale is already available. Should be interesting to see if there's seasonality
+* OverallCondition is actually a rank variable.
+* ValueOfMisc variable seems to be suspicious. should see if this is needed
+* Should see how HomeStyle, GardenExposure, affects Price
+
+###Columns that might not make much of a difference given most observations have one value
+
+* PavedDriveway (most of the columns is Y)
+* ValueOfMisc
+* CarParkingAreaCondition
+* FunctionalityRating (most are Typ)
+* HeaterMechanismType (most are GasA)
+* CellarCondition (Most are TA)
+* Electrical (most are SBrkr)
+* ExteriorMaterialCondition
+* Utilities
+* CarParkingQuality
+* ACType
+
+###Columns that have >13000 NA values
+
+* Miscellaneous
+* PoolQuality
+* CompoundWallQuality
+* GardenAccessPathType
+
+**All the above mentioned columns are categorical.  **
+
+
+** checking to see if these are true with test data as well
+
+```{r}
+summary(test)
+
+```
+
+** Test data also shows that the highlighted columns have a similar distribution.
+
+##Exploratory Data Analysis
+
+* Home Price by Region
+
+
+```{r}
+
+require(ggpubr)
+
+region_box <- ggplot(train, aes(group = Region, color = Region)) +
+  geom_boxplot(mapping = aes(x = Region, y = HomeAssetValue))
+  
+region_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x = Region, fill = Region))
+
+ggarrange(region_box, region_hist)
+print(prop.table(table(train$Region)))
+```
+
+**Observation: the RL region accounts for most of the home values but the prices in this region also vary the most. We can think of two models one for RL and other for the rest and combine for predictions.**
+
+**Proximity1 and Proximity 2**
+
+```{r}
+
+
+prox1_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = Proximity1, y = HomeAssetValue, group = Proximity1, color = Proximity1))
+
+prox1_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x = Proximity1, fill = Proximity1))
+
+prox2_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = Proximity2, y = HomeAssetValue, group = Proximity2, color = Proximity2))
+
+prox2_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x = Proximity2, fill = Proximity2))
+
+ggarrange(prox1_box, prox2_box, prox1_hist, prox2_hist)
+
+```
+
+
+** Normal proximity is heavily playing in the home asset value although the mean is the same as most of the other proximities
+so 
+
+```{r}
+
+region_proximity1 <- ggplot(train) +
+  geom_bar(mapping = aes(x = Region, group = Proximity1, fill = Proximity1))
+region_proximity2 <- ggplot(train) +
+  geom_bar(mapping = aes(x = Region, group = Proximity2, fill = Proximity2))
+
+ggarrange(region_proximity1, region_proximity2)
+
+```
+
+
+** The combination of Region = RL, Proximity1 = Normal, Proximity2 = Normal should be modeled separately. I will do that after creating a few models as is**
+
+
+** Visualizing how homestyle affects HomeAssetValue **
+
+```{r}
+
+homestyle_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = HomeStyle, y = HomeAssetValue, color=HomeStyle))
+homestyle_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x=HomeStyle, fill = HomeStyle))
+
+ggarrange(homestyle_box, homestyle_hist +rremove("x.text"), nrow=2, ncol=1)
+
+```
+
+** 1-story and 2-story houses make up the bulk of the sales. However the mean price doesn't seem to vary significantly from other types of homes**
+
+
+```{r}
+
+garden_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = GardenExposure, y = HomeAssetValue, color=GardenExposure))
+garden_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x=GardenExposure, fill = GardenExposure))
+
+ggarrange(garden_box, garden_hist +rremove("x.text"), nrow=2, ncol=1)
+
+```
+
+** GardenExposure has no impact on the median HomeAssetValue **
+
+```{r}
+
+condtype_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = ConditionOfSale, y = HomeAssetValue, color=ConditionOfSale))
+condtype_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x=ConditionOfSale, fill = ConditionOfSale))
+
+saletype_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = TypeOfSale, y = HomeAssetValue, color=TypeOfSale))
+saletype_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x=TypeOfSale, fill = TypeOfSale))
+
+ggarrange(condtype_box, saletype_box, condtype_hist, saletype_hist +rremove("x.text"))
+
+```
+
+
+```{r}
+hometype_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = HomeType, y = HomeAssetValue, color=HomeType))
+hometype_hist <- ggplot(train) +
+  geom_bar(mapping = aes(x=HomeType, fill = HomeType))
+
+ggarrange(hometype_box, hometype_hist +rremove("x.text"), nrow=2, ncol=1)
+
+
+```
+
+
+
+###Treating NAs for country and state
+
+* There are exactly 10 values in the training data set that do not have country/state specified. 
+* Checking if their central tendencies are significantly different. If no, will remove, if not, will have to treat them separately
+
+```{r}
+country_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = Country, y = HomeAssetValue))
+
+state_box <- ggplot(train) +
+  geom_boxplot(mapping = aes(x = State, y = HomeAssetValue))
+
+ggarrange(country_box, state_box, nrow=2, ncol = 1)
+```
+
+
+** there's not much of difference so will just impute these to be India and Maharashtra respectively
+
+```{r}
+
+train$Country <- ifelse(is.na(train$Country), "INDIA", levels(train$Country))
+table(train$Country)
+sum(is.na(train$Country))
+train$State <- ifelse(is.na(train$State), "Maharashtra", levels(train$State))
+table(train$State)
+sum(is.na(train$State))
+
+#doing the same with test data
+test$Country <- ifelse(is.na(test$Country), "INDIA", levels(test$Country))
+table(test$Country)
+sum(is.na(test$Country))
+test$State <- ifelse(is.na(test$State), "Maharashtra", levels(test$State))
+table(test$State)
+sum(is.na(test$State))
+
+
+```
+
+
+##Treating dates
+
+* The following columns have date type:
+ConstructionYear
+RemodelYear
+YearOfSale
+CarParkingStartYear
+
+* Will convert these into ages so that we can see how that impacts the sale price. If there's good correlation, will use their age when they were sold.
+
+
+```{r}
+
+sum(is.na(train$ConstructionYear))
+sum(is.na(train$RemodelYear))
+sum(is.na(train$YearOfSale))
+sum(is.na(train$CarParkingStartYear))
+
+#all four columns have data so will do a simple substraction
+
+train[,ConstructionAge := YearOfSale - ConstructionYear]
+train[,RemodelAge := YearOfSale - RemodelYear]
+train[,CarParkStartAge := YearOfSale - CarParkingStartYear]
+
+#Removing ConstructionYear, RemodelYear, and CarParkingStartYear
+train$ConstructionYear <- NULL
+train$RemodelYear <- NULL
+train$CarParkingStartYear <- NULL
+
+str(train)
+
+#doing the same with test
+test[,ConstructionAge := YearOfSale - ConstructionYear]
+test[,RemodelAge := YearOfSale - RemodelYear]
+test[,CarParkStartAge := YearOfSale - CarParkingStartYear]
+
+#Removing ConstructionYear, RemodelYear, and CarParkingStartYear
+test$ConstructionYear <- NULL
+test$RemodelYear <- NULL
+test$CarParkingStartYear <- NULL
+
+str(test)
+
+```
+
+
+
+
+###Removing columns that have majority one factor
+
+###Columns that might not make much of a difference given most observations have one value
+
+* PavedDriveway (most of the columns is Y)
+* ValueOfMisc
+* CarParkingAreaCondition
+* FunctionalityRating (most are Typ)
+* HeaterMechanismType (most are GasA)
+* CellarCondition (Most are TA)
+* Electrical (most are SBrkr)
+* ExteriorMaterialCondition
+* Utilities
+* CarParkingQuality
+* ACType
+
+###Columns that have >13000 NA values
+
+* Miscellaneous
+* PoolQuality
+* CompoundWallQuality
+* GardenAccessPathType
+
+**All the above mentioned columns are categorical.  
+
+```{r}
+cols_to_exclude = c('PavedDriveway', 'ValueOfMisc', 'CarParkingAreaCondition', 'FunctionalityRating', 'HeaterMechanismType', 'CellarCondition', 'Electrical', 'ExteriorMaterialCondition', 'Utilities', 'CarParkingQuality', 'ACType')
+
+na_cols_to_exclude = c('Miscellaneous', 'PoolQuality', 'CompoundWallQuality', 'GardenAccessPathType')
+
+cptrain <- train
+
+cptrain <- cptrain[, !cols_to_exclude, with=FALSE]
+cptrain <- cptrain[, !na_cols_to_exclude, with=FALSE]
+
+cptest <- test
+cptest <- cptest[, !cols_to_exclude, with=FALSE]
+cptest <- cptest[, !na_cols_to_exclude, with=FALSE]
+
+
+```
+
+
+#check if any other columns have NA that we have to treat differently
+
+```{r}
+sort(colSums(is.na(cptrain)), decreasing=TRUE)
+
+```
+
+*AcsQuality column has almost 10% of NAs. 
+
+```{r}
+
+str(cptrain$AcsQuality)
+summary(cptrain$AcsQuality)
+
+table(cptrain$AcsQuality)
+```
+
+* this is a categorical column so setting the value to Gd (assuming those are good)
+
+```{r}
+
+for (i in 1:length(cptrain$AcsQuality)) {
+  if(is.na(cptrain$AcsQuality[i])) {
+    cptrain$AcsQuality[i] <- "Gd"
+  }
+}
+
+table(cptrain$AcsQuality)
+```
+
+
+```{r}
+sort(colSums(is.na(cptrain)), decreasing=TRUE)
+
+#CellarFinishingQualityType2, InteriorCarParkingFinish, CarParkingType, TilingType,GardenExposure,CellarFinishingQualityType1,CellarQuality
+
+getImputedValue <- function(vec) {
+  freqVal <- names(sort(table(vec), decreasing=TRUE))[1]
+  ret <- vec                         
+  for (i in 1:length(vec)) {
+    if(is.na(vec[i])) {
+      ret[i] <- freqVal
+    }
+  }
+  return(ret)
+}
+
+
+cptrain$CellarFinishingQualityType2 <- getImputedValue(cptrain$CellarFinishingQualityType2)
+table(cptrain$CellarFinishingQualityType2)
+sum(is.na(cptrain$CellarFinishingQualityType2))
+
+cptrain$InteriorCarParkingFinish <- getImputedValue(cptrain$InteriorCarParkingFinish)
+sum(is.na(cptrain$InteriorCarParkingFinish))
+
+cptrain$CarParkingType <- getImputedValue(cptrain$CarParkingType)
+sum(is.na(cptrain$CarParkingType))
+
+cptrain$TilingType <- getImputedValue(cptrain$TilingType)
+
+cptrain$GardenExposure <- getImputedValue(cptrain$GardenExposure)
+cptrain$CellarFinishingQualityType1 <- getImputedValue(cptrain$CellarFinishingQualityType1)
+cptrain$CellarQuality <- getImputedValue(cptrain$CellarQuality)
+
+sum(is.na(cptrain))
+
+```
+
+
+* check the same with test data
+
+```{r}
+
+cptest$AcsQuality <- getImputedValue(cptest$AcsQuality)
+cptest$InteriorCarParkingFinish <- getImputedValue(cptest$InteriorCarParkingFinish)
+cptest$CarParkingType <- getImputedValue(cptest$CarParkingType)
+cptest$CellarFinishingQualityType1 <- getImputedValue(cptest$CellarFinishingQualityType1)
+cptest$CellarFinishingQualityType2 <- getImputedValue(cptest$CellarFinishingQualityType2)
+cptest$GardenExposure <- getImputedValue(cptest$GardenExposure)
+cptest$TilingType <- getImputedValue(cptest$TilingType)
+cptest$CellarQuality <- getImputedValue(cptest$CellarQuality)
+
+sort(colSums(is.na(cptest)), decreasing=TRUE)
+
+```
+
+
+###Convert all factor columns into numeric by creating dummy variables
+
+```{r}
+cptrain$State <- as.factor(cptrain$State)
+cptest$State <- as.factor(cptest$State)
+cptrain$Country <- as.factor(cptrain$Country)
+cptest$Country <- as.factor(cptest$Country)
+summary(cptrain)
+
+factorcols <- names(which(sapply(cptrain, class) == 'factor'))
+
+library(dummies)
+
+sapply(cptrain[,factorcols, with=FALSE], dummy.data.frame)
+
+str(cptrain$State)
+```
+
